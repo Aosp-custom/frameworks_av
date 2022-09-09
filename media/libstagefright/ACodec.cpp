@@ -787,7 +787,7 @@ status_t ACodec::handleSetSurface(const sp<Surface> &surface) {
 
     // we cannot change the number of output buffers while OMX is running
     // set up surface to the same count
-    Vector<BufferInfo> &buffers = mBuffers[kPortIndexOutput];
+    std::vector<BufferInfo> &buffers = mBuffers[kPortIndexOutput];
     ALOGV("setting up surface for %zu buffers", buffers.size());
 
     err = native_window_set_buffer_count(nativeWindow, buffers.size());
@@ -827,7 +827,7 @@ status_t ACodec::handleSetSurface(const sp<Surface> &surface) {
     // cancel undequeued buffers to new surface
     if (!storingMetadataInDecodedBuffers()) {
         for (size_t i = 0; i < buffers.size(); ++i) {
-            BufferInfo &info = buffers.editItemAt(i);
+            BufferInfo &info = buffers[i];
             if (info.mStatus == BufferInfo::OWNED_BY_NATIVE_WINDOW) {
                 ALOGV("canceling buffer %p", info.mGraphicBuffer->getNativeBuffer());
                 err = nativeWindow->cancelBuffer(
@@ -874,7 +874,7 @@ status_t ACodec::allocateBuffersOnPort(OMX_U32 portIndex) {
     CHECK(portIndex == kPortIndexInput || portIndex == kPortIndexOutput);
 
     CHECK(mAllocator[portIndex] == NULL);
-    CHECK(mBuffers[portIndex].isEmpty());
+    CHECK(mBuffers[portIndex].empty());
 
     status_t err;
     if (mNativeWindow != NULL && portIndex == kPortIndexOutput) {
@@ -953,6 +953,7 @@ status_t ACodec::allocateBuffersOnPort(OMX_U32 portIndex) {
 
             const sp<AMessage> &format =
                     portIndex == kPortIndexInput ? mInputFormat : mOutputFormat;
+            mBuffers[portIndex].reserve(def.nBufferCountActual);
             for (OMX_U32 i = 0; i < def.nBufferCountActual && err == OK; ++i) {
                 hidl_memory hidlMemToken;
                 sp<TMemory> hidlMem;
@@ -1041,7 +1042,7 @@ status_t ACodec::allocateBuffersOnPort(OMX_U32 portIndex) {
                     }
                 }
 
-                mBuffers[portIndex].push(info);
+                mBuffers[portIndex].push_back(info);
             }
         }
     }
@@ -1252,6 +1253,7 @@ status_t ACodec::allocateOutputBuffersFromNativeWindow() {
          mComponentName.c_str(), bufferCount, bufferSize);
 
     // Dequeue buffers and send them to OMX
+    mBuffers[kPortIndexOutput].reserve(bufferCount);
     for (OMX_U32 i = 0; i < bufferCount; i++) {
         ANativeWindowBuffer *buf;
         int fenceFd;
@@ -1277,7 +1279,7 @@ status_t ACodec::allocateOutputBuffersFromNativeWindow() {
         info.mData = new MediaCodecBuffer(mOutputFormat, new ABuffer(bufferSize));
         info.mCodecData = info.mData;
 
-        mBuffers[kPortIndexOutput].push(info);
+        mBuffers[kPortIndexOutput].push_back(info);
 
         IOMX::buffer_id bufferId;
         err = mOMXNode->useBuffer(kPortIndexOutput, graphicBuffer, &bufferId);
@@ -1287,7 +1289,7 @@ status_t ACodec::allocateOutputBuffersFromNativeWindow() {
             break;
         }
 
-        mBuffers[kPortIndexOutput].editItemAt(i).mBufferID = bufferId;
+        mBuffers[kPortIndexOutput][i].mBufferID = bufferId;
 
         ALOGV("[%s] Registered graphic buffer with ID %u (pointer = %p)",
              mComponentName.c_str(),
@@ -1309,7 +1311,7 @@ status_t ACodec::allocateOutputBuffersFromNativeWindow() {
     }
 
     for (OMX_U32 i = cancelStart; i < cancelEnd; i++) {
-        BufferInfo *info = &mBuffers[kPortIndexOutput].editItemAt(i);
+        BufferInfo *info = &mBuffers[kPortIndexOutput][i];
         if (info->mStatus == BufferInfo::OWNED_BY_US) {
             status_t error = cancelBufferToNativeWindow(info);
             if (err == 0) {
@@ -1338,6 +1340,7 @@ status_t ACodec::allocateOutputMetadataBuffers() {
     ALOGV("[%s] Allocating %u meta buffers on output port",
          mComponentName.c_str(), bufferCount);
 
+    mBuffers[kPortIndexOutput].reserve(bufferCount);
     for (OMX_U32 i = 0; i < bufferCount; i++) {
         BufferInfo info;
         info.mStatus = BufferInfo::OWNED_BY_NATIVE_WINDOW;
@@ -1355,7 +1358,7 @@ status_t ACodec::allocateOutputMetadataBuffers() {
         info.mCodecData = info.mData;
 
         err = mOMXNode->useBuffer(kPortIndexOutput, OMXBuffer::sPreset, &info.mBufferID);
-        mBuffers[kPortIndexOutput].push(info);
+        mBuffers[kPortIndexOutput].push_back(info);
 
         ALOGV("[%s] allocated meta buffer with ID %u",
                 mComponentName.c_str(), info.mBufferID);
@@ -1464,7 +1467,7 @@ void ACodec::notifyOfRenderedFrames(bool dropIncomplete, FrameRenderTracker::Inf
             it != done.cend(); ++it) {
         ssize_t index = it->getIndex();
         if (index >= 0 && (size_t)index < mBuffers[kPortIndexOutput].size()) {
-            mBuffers[kPortIndexOutput].editItemAt(index).mRenderInfo = NULL;
+            mBuffers[kPortIndexOutput][index].mRenderInfo = NULL;
         } else if (index >= 0) {
             // THIS SHOULD NEVER HAPPEN
             ALOGE("invalid index %zd in %zu", index, mBuffers[kPortIndexOutput].size());
@@ -1504,7 +1507,7 @@ ACodec::BufferInfo *ACodec::dequeueBufferFromNativeWindow() {
         bool stale = false;
         for (size_t i = mBuffers[kPortIndexOutput].size(); i > 0;) {
             i--;
-            BufferInfo *info = &mBuffers[kPortIndexOutput].editItemAt(i);
+            BufferInfo *info = &mBuffers[kPortIndexOutput][i];
 
             if (info->mGraphicBuffer != NULL &&
                     info->mGraphicBuffer->handle == buf->handle) {
@@ -1552,8 +1555,7 @@ ACodec::BufferInfo *ACodec::dequeueBufferFromNativeWindow() {
     BufferInfo *oldest = NULL;
     for (size_t i = mBuffers[kPortIndexOutput].size(); i > 0;) {
         i--;
-        BufferInfo *info =
-            &mBuffers[kPortIndexOutput].editItemAt(i);
+        BufferInfo *info = &mBuffers[kPortIndexOutput][i];
         if (info->mStatus == BufferInfo::OWNED_BY_NATIVE_WINDOW &&
             (oldest == NULL ||
              // avoid potential issues from counter rolling over
@@ -1610,8 +1612,7 @@ status_t ACodec::freeOutputBuffersNotOwnedByComponent() {
     status_t err = OK;
     for (size_t i = mBuffers[kPortIndexOutput].size(); i > 0;) {
         i--;
-        BufferInfo *info =
-            &mBuffers[kPortIndexOutput].editItemAt(i);
+        BufferInfo *info = &mBuffers[kPortIndexOutput][i];
 
         // At this time some buffers may still be with the component
         // or being drained.
@@ -1628,7 +1629,7 @@ status_t ACodec::freeOutputBuffersNotOwnedByComponent() {
 }
 
 status_t ACodec::freeBuffer(OMX_U32 portIndex, size_t i) {
-    BufferInfo *info = &mBuffers[portIndex].editItemAt(i);
+    BufferInfo *info = &mBuffers[portIndex][i];
     status_t err = OK;
 
     // there should not be any fences in the metadata
@@ -1668,14 +1669,14 @@ status_t ACodec::freeBuffer(OMX_U32 portIndex, size_t i) {
     }
 
     // remove buffer even if mOMXNode->freeBuffer fails
-    mBuffers[portIndex].removeAt(i);
+    mBuffers[portIndex].erase(mBuffers[portIndex].begin() + i);
     return err;
 }
 
 ACodec::BufferInfo *ACodec::findBufferByID(
         uint32_t portIndex, IOMX::buffer_id bufferID, ssize_t *index) {
     for (size_t i = 0; i < mBuffers[portIndex].size(); ++i) {
-        BufferInfo *info = &mBuffers[portIndex].editItemAt(i);
+        BufferInfo *info = &mBuffers[portIndex][i];
 
         if (info->mBufferID == bufferID) {
             if (index != NULL) {
@@ -5112,7 +5113,7 @@ size_t ACodec::countBuffersOwnedByComponent(OMX_U32 portIndex) const {
     size_t n = 0;
 
     for (size_t i = 0; i < mBuffers[portIndex].size(); ++i) {
-        const BufferInfo &info = mBuffers[portIndex].itemAt(i);
+        const BufferInfo &info = mBuffers[portIndex][i];
 
         if (info.mStatus == BufferInfo::OWNED_BY_COMPONENT) {
             ++n;
@@ -5126,7 +5127,7 @@ size_t ACodec::countBuffersOwnedByNativeWindow() const {
     size_t n = 0;
 
     for (size_t i = 0; i < mBuffers[kPortIndexOutput].size(); ++i) {
-        const BufferInfo &info = mBuffers[kPortIndexOutput].itemAt(i);
+        const BufferInfo &info = mBuffers[kPortIndexOutput][i];
 
         if (info.mStatus == BufferInfo::OWNED_BY_NATIVE_WINDOW) {
             ++n;
@@ -5153,7 +5154,7 @@ void ACodec::waitUntilAllPossibleNativeWindowBuffersAreReturnedToUs() {
 bool ACodec::allYourBuffersAreBelongToUs(
         OMX_U32 portIndex) {
     for (size_t i = 0; i < mBuffers[portIndex].size(); ++i) {
-        BufferInfo *info = &mBuffers[portIndex].editItemAt(i);
+        BufferInfo *info = &mBuffers[portIndex][i];
 
         if (info->mStatus != BufferInfo::OWNED_BY_US
                 && info->mStatus != BufferInfo::OWNED_BY_NATIVE_WINDOW) {
@@ -6498,7 +6499,7 @@ void ACodec::BaseState::getMoreInputDataIfPossible() {
     BufferInfo *eligible = NULL;
 
     for (size_t i = 0; i < mCodec->mBuffers[kPortIndexInput].size(); ++i) {
-        BufferInfo *info = &mCodec->mBuffers[kPortIndexInput].editItemAt(i);
+        BufferInfo *info = &mCodec->mBuffers[kPortIndexInput][i];
 
 #if 0
         if (info->mStatus == BufferInfo::OWNED_BY_UPSTREAM) {
@@ -7597,7 +7598,7 @@ void ACodec::ExecutingState::submitOutputMetaBuffers() {
     // submit as many buffers as there are input buffers with the codec
     // in case we are in port reconfiguring
     for (size_t i = 0; i < mCodec->mBuffers[kPortIndexInput].size(); ++i) {
-        BufferInfo *info = &mCodec->mBuffers[kPortIndexInput].editItemAt(i);
+        BufferInfo *info = &mCodec->mBuffers[kPortIndexInput][i];
 
         if (info->mStatus == BufferInfo::OWNED_BY_COMPONENT) {
             if (mCodec->submitOutputMetadataBuffer() != OK)
@@ -7615,7 +7616,7 @@ void ACodec::ExecutingState::submitOutputMetaBuffers() {
 void ACodec::ExecutingState::submitRegularOutputBuffers() {
     bool failed = false;
     for (size_t i = 0; i < mCodec->mBuffers[kPortIndexOutput].size(); ++i) {
-        BufferInfo *info = &mCodec->mBuffers[kPortIndexOutput].editItemAt(i);
+        BufferInfo *info = &mCodec->mBuffers[kPortIndexOutput][i];
 
         if (mCodec->mNativeWindow != NULL) {
             if (info->mStatus != BufferInfo::OWNED_BY_US
@@ -7672,7 +7673,7 @@ void ACodec::ExecutingState::resume() {
     }
 
     for (size_t i = 0; i < mCodec->mBuffers[kPortIndexInput].size(); i++) {
-        BufferInfo *info = &mCodec->mBuffers[kPortIndexInput].editItemAt(i);
+        BufferInfo *info = &mCodec->mBuffers[kPortIndexInput][i];
         if (info->mStatus == BufferInfo::OWNED_BY_US) {
             postFillThisBuffer(info);
         }
@@ -8688,7 +8689,7 @@ bool ACodec::OutputPortSettingsChangedState::onOMXEvent(
                 ALOGV("[%s] Output port now disabled.", mCodec->mComponentName.c_str());
 
                 status_t err = OK;
-                if (!mCodec->mBuffers[kPortIndexOutput].isEmpty()) {
+                if (!mCodec->mBuffers[kPortIndexOutput].empty()) {
                     ALOGE("disabled port should be empty, but has %zu buffers",
                             mCodec->mBuffers[kPortIndexOutput].size());
                     err = FAILED_TRANSACTION;
